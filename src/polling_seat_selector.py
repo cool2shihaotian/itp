@@ -150,7 +150,8 @@ class PollingSeatSelector:
                                         'floor': seat.get('floor'),
                                         'row_no': seat.get('rowNo'),
                                         'seat_no': seat.get('seatNo'),
-                                        'price': price
+                                        'price': price,
+                                        'block_key': block.get('blockKey')  # ⭐ 添加 blockKey
                                     }
                     except Exception as e:
                         self.logger.warning(f"解析座位数据异常: {e}")
@@ -291,6 +292,7 @@ class PollingSeatSelector:
                     'row_no': available_seat['row_no'],
                     'seat_no': available_seat['seat_no'],
                     'price': available_seat['price'],
+                    'block_key': available_seat.get('block_key'),  # ⭐ 添加 block_key
                     'poll_count': poll_count,
                     'elapsed_time': int(elapsed),
                     'strategy': 'polling_seatmeta'

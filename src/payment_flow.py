@@ -41,6 +41,48 @@ class InterparkPaymentFlow:
         """生成 trace ID"""
         return str(uuid.uuid4())
 
+    def refresh_session(self, session_id: str) -> bool:
+        """
+        刷新 session（调用 session-check API）
+
+        Args:
+            session_id: 会话 ID
+
+        Returns:
+            是否成功
+        """
+        try:
+            # 从 session_id 中提取纯 session（去除前缀）
+            pure_session = session_id.split('_', 1)[1] if '_' in session_id else session_id
+
+            url = f"https://tickets.interpark.com/onestop/api/session-check/{pure_session}"
+
+            headers = {
+                'Accept': 'application/json, text/plain, */*',
+                'Content-Type': 'application/json',
+                'Origin': 'https://tickets.interpark.com',
+                'Referer': 'https://tickets.interpark.com/onestop/payment',
+                'x-onestop-channel': 'TRIPLE_KOREA',
+                'x-onestop-session': pure_session,
+                'x-onestop-trace-id': self._generate_trace_id(),
+                'x-requested-with': 'XMLHttpRequest',
+                'x-ticket-bff-language': 'KO'
+            }
+
+            # POST 请求，body 为空
+            response = self.client.post(url, headers=headers, json={})
+
+            if response.status_code in [200, 201]:
+                self.logger.debug(f"✅ Session 刷新成功: {pure_session[:20]}...")
+                return True
+            else:
+                self.logger.warning(f"⚠️ Session 刷新失败: {response.status_code}")
+                return False
+
+        except Exception as e:
+            self.logger.warning(f"⚠️ Session 刷新异常: {e}")
+            return False
+
     def preselect_seat(self, selected_seat: Dict, session_id: str,
                       block_key: str = None) -> Optional[Dict]:
         """
@@ -61,29 +103,22 @@ class InterparkPaymentFlow:
 
             url = "https://tickets.interpark.com/onestop/api/seats/preselect"
 
-            # 从 seatInfoId 中提取信息
-            # 格式: "25018223:25001698:001:2500"
-            # 分解: goodsCode:placeCode:playSeq:seatCode
-            seat_info_id = selected_seat.get('seat_info_id', '')
-            parts = seat_info_id.split(':')
+            # ⭐ 关键修复：blockKey 的格式是 "playSeq:401"
+            # 根据成功的请求，blockNo 似乎总是 401
+            play_seq = selected_seat.get('play_seq', '')
 
-            if len(parts) < 4:
-                self.logger.error(f"❌ seatInfoId 格式错误: {seat_info_id}")
-                return None
-
-            play_seq_from_id = parts[2]  # 从 seatInfoId 提取 playSeq
-
-            # 如果没有提供 blockKey，尝试构造
             if not block_key:
-                # blockKey 格式: "001:401" (playSeq:blockNo)
-                # 需要获取 blockNo，这里先简化处理
-                block_key = f"{play_seq_from_id}:401"  # 默认使用 401
+                # 构造 blockKey: "playSeq:401"
+                block_key = f"{play_seq}:401"
+                self.logger.info(f"✅ 使用 blockKey: {block_key} (格式: playSeq:401)")
+
+            seat_info_id = selected_seat.get('seat_info_id', '')
 
             data = {
                 "blockKey": block_key,
                 "goodsCode": self.goods_code,
                 "placeCode": self.place_code,
-                "playSeq": selected_seat.get('play_seq', play_seq_from_id),
+                "playSeq": play_seq,
                 "seatInfoId": seat_info_id,
                 "sessionId": session_id
             }
@@ -213,6 +248,9 @@ class InterparkPaymentFlow:
 
             # 默认配送信息
             if not delivery_info:
+                # ⭐ 从 config 获取真实手机号
+                user_phone = self.config.get('account', {}).get('phone', member_info.get('phone', '821012345678'))
+
                 delivery_info = {
                     "deliveryMethod": "WILL_CALL",
                     "deliveryAmount": 0,
@@ -222,7 +260,7 @@ class InterparkPaymentFlow:
                     "name": member_info.get('name', 'USER'),
                     "birthDate": member_info.get('birthDate', '9602120'),
                     "email": member_info.get('email', 'user@example.com'),
-                    "userPhone": member_info.get('phone', '821012345678'),
+                    "userPhone": user_phone,  # ⭐ 使用真实手机号
                     "recipient": "",
                     "addressPhone": "",
                     "subAddressPhone": "",
@@ -243,6 +281,9 @@ class InterparkPaymentFlow:
                 "4": "U2",  # A座
             }
             price_grade = price_grade_map.get(seat_grade, "U1")
+
+            # ⭐ 关键修复：使用正确的价格格式
+            sales_price_str = f"{sales_price}.0"  # "143000.0"
 
             data = {
                 "autoSeat": False,
@@ -284,16 +325,16 @@ class InterparkPaymentFlow:
                         "groupId": "12133",
                         "pgCode": "PG002",
                         "priceGrade": price_grade,
-                        "priceGradeName": "一般",
-                        "salesPrice": str(float(sales_price)),
+                        "priceGradeName": "일반",
+                        "salesPrice": sales_price_str,
                         "seatGrade": seat_grade,
                         "seatGradeName": seat_grade_name,
-                        "ticketAmount": str(float(sales_price))
+                        "ticketAmount": sales_price_str  # ⭐ 使用字符串格式
                     }
                 ],
                 "seatInfo": [
                     {
-                        "blockNo": "401",  # 从 seatInfoId 提取或默认
+                        "blockNo": "401",  # 从 blockKey 提取
                         "floor": selected_seat.get('floor', '1층'),
                         "rowNo": selected_seat.get('row_no', ''),
                         "seatGrade": seat_grade,
@@ -324,14 +365,16 @@ class InterparkPaymentFlow:
                 'x-onestop-session': session_id,
                 'x-onestop-trace-id': self._generate_trace_id(),
                 'x-requested-with': 'XMLHttpRequest',
-                'x-ticket-bff-language': 'ZH'  # 添加语言 header
+                'x-ticket-bff-language': 'KO'  # 韩语
             }
             self.client.update_headers(headers)
 
             # 打印完整请求体（用于调试）
-            self.logger.debug(f"完整请求体: {json.dumps(data, indent=2, ensure_ascii=False)}")
+            self.logger.info(f"完整请求体: {json.dumps(data, indent=2, ensure_ascii=False)}")
 
             response = self.client.post(url, json=data)
+
+            self.logger.info(f"响应状态码: {response.status_code}")
 
             if response.status_code in [200, 201]:
                 result = response.json()
@@ -484,17 +527,29 @@ class InterparkPaymentFlow:
             self.logger.info("开始执行完整的付款流程")
             self.logger.info("🎯" * 35)
 
+            # ⭐ 步骤前刷新 session
+            self.logger.info("🔄 刷新 Session...")
+            self.refresh_session(session_id)
+
             # 步骤 1: 预选座位
             preselect_result = self.preselect_seat(selected_seat, session_id)
             if not preselect_result:
                 self.logger.error("❌ 预选座位失败，流程终止")
                 return None
 
+            # ⭐ 步骤前刷新 session
+            self.logger.info("🔄 刷新 Session...")
+            self.refresh_session(session_id)
+
             # 步骤 2: 确认选座
             select_result = self.select_seat(selected_seat, session_id)
             if not select_result:
                 self.logger.error("❌ 确认选座失败，流程终止")
                 return None
+
+            # ⭐ 步骤前刷新 session
+            self.logger.info("🔄 刷新 Session...")
+            self.refresh_session(session_id)
 
             # 步骤 3: 准备付款
             payment_ready_result = self.ready_payment(
@@ -508,6 +563,10 @@ class InterparkPaymentFlow:
             sales_price = int(selected_seat.get('price', 143000))
             commission_fee = 8000
             total_fee = sales_price + commission_fee
+
+            # ⭐ 步骤前刷新 session
+            self.logger.info("🔄 刷新 Session...")
+            self.refresh_session(session_id)
 
             # 步骤 4: 请求 Eximbay 支付
             eximbay_result = self.request_eximbay_payment(
